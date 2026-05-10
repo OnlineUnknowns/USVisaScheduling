@@ -1,0 +1,285 @@
+const std = @import("std");
+
+const Allocator = std.mem.Allocator;
+
+pub const PacketType = enum {
+    modbus,
+    opcua,
+    dnp3,
+    unknown,
+};
+
+pub const SecurityLevel = enum {
+    safe,
+    suspicious,
+    critical,
+};
+
+pub const Packet = struct {
+    payload: []u8,
+    source_ip: []const u8,
+    destination_ip: []const u8,
+    size: usize,
+};
+
+pub const AnalysisResult = struct {
+    packet_type: PacketType,
+    security_level: SecurityLevel,
+    checksum_valid: bool,
+    anomaly_score: u32,
+};
+
+pub const PacketGuard = struct {
+    allocator: Allocator,
+
+    pub fn init(
+        allocator: Allocator,
+    ) PacketGuard {
+        return PacketGuard{
+            .allocator = allocator,
+        };
+    }
+
+    pub fn inspectPacket(
+        self: *PacketGuard,
+        packet: Packet,
+    ) !AnalysisResult {
+        _ = self;
+
+        const protocol =
+            try detectProtocol(
+                packet.payload,
+            );
+
+        const checksum_valid =
+            validateChecksum(
+                packet.payload,
+            );
+
+        const anomaly_score =
+            calculateAnomalyScore(
+                packet,
+            );
+
+        const security =
+            classifyThreat(
+                checksum_valid,
+                anomaly_score,
+            );
+
+        return AnalysisResult{
+            .packet_type = protocol,
+            .security_level = security,
+            .checksum_valid = checksum_valid,
+            .anomaly_score = anomaly_score,
+        };
+    }
+
+    fn detectProtocol(
+        payload: []u8,
+    ) !PacketType {
+        if (payload.len < 4) {
+            return PacketType.unknown;
+        }
+
+        if (payload[0] == 0x00 and
+            payload[1] == 0x01)
+        {
+            return PacketType.modbus;
+        }
+
+        if (payload[0] == 0x4F and
+            payload[1] == 0x50)
+        {
+            return PacketType.opcua;
+        }
+
+        if (payload[0] == 0x05) {
+            return PacketType.dnp3;
+        }
+
+        return PacketType.unknown;
+    }
+
+    fn validateChecksum(
+        payload: []u8,
+    ) bool {
+        var checksum: u8 = 0;
+
+        for (payload) |byte| {
+            checksum ^= byte;
+        }
+
+        return checksum == 0;
+    }
+
+    fn calculateAnomalyScore(
+        packet: Packet,
+    ) u32 {
+        var score: u32 = 0;
+
+        if (packet.size > 2048) {
+            score += 40;
+        }
+
+        if (containsSuspiciousPattern(
+            packet.payload,
+        )) {
+            score += 35;
+        }
+
+        if (detectPayloadEntropy(
+            packet.payload,
+        ) > 7) {
+            score += 25;
+        }
+
+        return score;
+    }
+
+    fn containsSuspiciousPattern(
+        payload: []u8,
+    ) bool {
+        const patterns = [_][]const u8{
+            "exec",
+            "shell",
+            "inject",
+            "overflow",
+        };
+
+        for (patterns) |pattern| {
+            if (std.mem.indexOf(
+                u8,
+                payload,
+                pattern,
+            ) != null) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    fn detectPayloadEntropy(
+        payload: []u8,
+    ) u8 {
+        var frequency: [256]u32 =
+            [_]u32{0} ** 256;
+
+        for (payload) |byte| {
+            frequency[byte] += 1;
+        }
+
+        var unique: u8 = 0;
+
+        for (frequency) |count| {
+            if (count > 0) {
+                unique += 1;
+            }
+        }
+
+        return unique;
+    }
+
+    fn classifyThreat(
+        checksum_valid: bool,
+        anomaly_score: u32,
+    ) SecurityLevel {
+        if (!checksum_valid) {
+            return SecurityLevel.critical;
+        }
+
+        if (anomaly_score >= 70) {
+            return SecurityLevel.critical;
+        }
+
+        if (anomaly_score >= 30) {
+            return SecurityLevel.suspicious;
+        }
+
+        return SecurityLevel.safe;
+    }
+
+    pub fn isolateThreat(
+        self: *PacketGuard,
+        packet: Packet,
+    ) !void {
+        _ = self;
+
+        std.debug.print(
+            "Threat isolated from {s}\n",
+            .{packet.source_ip},
+        );
+    }
+
+    pub fn logPacket(
+        self: *PacketGuard,
+        result: AnalysisResult,
+    ) !void {
+        _ = self;
+
+        std.debug.print(
+            "Packet Type: {any}\n",
+            .{result.packet_type},
+        );
+
+        std.debug.print(
+            "Threat Level: {any}\n",
+            .{result.security_level},
+        );
+
+        std.debug.print(
+            "Checksum Valid: {}\n",
+            .{result.checksum_valid},
+        );
+
+        std.debug.print(
+            "Anomaly Score: {}\n",
+            .{result.anomaly_score},
+        );
+    }
+};
+
+pub fn main() !void {
+    var gpa =
+        std.heap.GeneralPurposeAllocator(
+            .{},
+        ){};
+
+    defer _ = gpa.deinit();
+
+    var guard =
+        PacketGuard.init(
+            gpa.allocator(),
+        );
+
+    const sample_payload =
+        [_]u8{
+            0x00, 0x01, 0xAA,
+            0xBB, 0xCC, 0xDD,
+        };
+
+    const packet = Packet{
+        .payload = sample_payload[0..],
+        .source_ip = "10.0.0.15",
+        .destination_ip = "10.0.0.20",
+        .size = sample_payload.len,
+    };
+
+    const result =
+        try guard.inspectPacket(
+            packet,
+        );
+
+    try guard.logPacket(
+        result,
+    );
+
+    if (result.security_level ==
+        SecurityLevel.critical)
+    {
+        try guard.isolateThreat(
+            packet,
+        );
+    }
+}
